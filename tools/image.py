@@ -202,7 +202,8 @@ def standardize(x,
                 mean=None,
                 std=None,
                 zca_whitening=False,
-                principal_components=None):
+                principal_components=None,
+                rng=None):
     if preprocessing_function:
         x = preprocessing_function(x)
     if rescale:
@@ -255,7 +256,13 @@ def random_transform(x,
                      cval=0.,
                      channel_shift_range=0.,
                      horizontal_flip=False,
-                     vertical_flip=False):
+                     vertical_flip=False,
+                     rng=None):
+
+    random_source = 'rng'
+    if rng is None:
+        random_source = 'np'
+        rng = np.random
 
     # x is a single image, so it doesn't have image number at index 0
     img_row_axis = row_axis - 1
@@ -265,19 +272,19 @@ def random_transform(x,
     # use composition of homographies
     # to generate final transform that needs to be applied
     if rotation_range:
-        theta = np.pi / 180 * np.random.uniform(-rotation_range, rotation_range)
+        theta = np.pi / 180 * rng.uniform(-rotation_range, rotation_range)
     else:
         theta = 0
     rotation_matrix = np.array([[np.cos(theta), -np.sin(theta), 0],
                                 [np.sin(theta), np.cos(theta), 0],
                                 [0, 0, 1]])
     if height_shift_range:
-        tx = np.random.uniform(-height_shift_range, height_shift_range) * x.shape[img_row_axis]
+        tx = rng.uniform(-height_shift_range, height_shift_range) * x.shape[img_row_axis]
     else:
         tx = 0
 
     if width_shift_range:
-        ty = np.random.uniform(-width_shift_range, width_shift_range) * x.shape[img_col_axis]
+        ty = rng.uniform(-width_shift_range, width_shift_range) * x.shape[img_col_axis]
     else:
         ty = 0
 
@@ -285,7 +292,7 @@ def random_transform(x,
                                    [0, 1, ty],
                                    [0, 0, 1]])
     if shear_range:
-        shear = np.random.uniform(-shear_range, shear_range)
+        shear = rng.uniform(-shear_range, shear_range)
     else:
         shear = 0
     shear_matrix = np.array([[1, -np.sin(shear), 0],
@@ -295,7 +302,7 @@ def random_transform(x,
     if zoom_range[0] == 1 and zoom_range[1] == 1:
         zx, zy = 1, 1
     else:
-        zx, zy = np.random.uniform(zoom_range[0], zoom_range[1], 2)
+        zx, zy = rng.uniform(zoom_range[0], zoom_range[1], 2)
     zoom_matrix = np.array([[zx, 0, 0],
                             [0, zy, 0],
                             [0, 0, 1]])
@@ -313,12 +320,19 @@ def random_transform(x,
         x = random_channel_shift(x,
                                  channel_shift_range,
                                  img_channel_axis)
+
+    get_random = None
+    if random_source == 'np':
+        get_random = np.random.random
+    else:
+        get_random = rng.rand
+
     if horizontal_flip:
-        if np.random.random() < 0.5:
+        if get_random() < 0.5:
             x = flip_axis(x, img_col_axis)
 
     if vertical_flip:
-        if np.random.random() < 0.5:
+        if get_random() < 0.5:
             x = flip_axis(x, img_row_axis)
 
     return x
@@ -583,20 +597,6 @@ class ImageDataGenerator(object):
 
     def pipeline(self):
         return [
-            (standardize, dict(
-                preprocessing_function=self.preprocessing_function,
-                rescale=self.rescale,
-                channel_axis=self.channel_axis,
-                samplewise_center=self.samplewise_center,
-                samplewise_std_normalization=self.samplewise_std_normalization,
-                featurewise_center=self.featurewise_center,
-                mean=self.mean,
-                featurewise_std_normalization=self.featurewise_std_normalization,
-                std=self.std,
-                zca_whitening=self.zca_whitening,
-                principal_components=self.principal_components)
-            ),
-
             (random_transform, dict(
                 row_axis=self.row_axis,
                 col_axis=self.col_axis,
@@ -611,6 +611,20 @@ class ImageDataGenerator(object):
                 channel_shift_range=self.channel_shift_range,
                 horizontal_flip=self.horizontal_flip,
                 vertical_flip=self.vertical_flip)
+            ),
+
+            (standardize, dict(
+                preprocessing_function=self.preprocessing_function,
+                rescale=self.rescale,
+                channel_axis=self.channel_axis,
+                samplewise_center=self.samplewise_center,
+                samplewise_std_normalization=self.samplewise_std_normalization,
+                featurewise_center=self.featurewise_center,
+                mean=self.mean,
+                featurewise_std_normalization=self.featurewise_std_normalization,
+                std=self.std,
+                zca_whitening=self.zca_whitening,
+                principal_components=self.principal_components)
             )
         ]
 
@@ -720,6 +734,11 @@ class Iterator(object):
         self.lock = threading.Lock()
         self.index_generator = self._flow_index(n, batch_size, shuffle, seed)
 
+        if seed:
+            self.rngs = [np.random.RandomState(seed + i) for i in range(batch_size)]
+        else:
+            self.rngs = [np.random.RandomState(i) for i in range(batch_size)]
+
     def reset(self):
         self.batch_index = 0
 
@@ -756,8 +775,9 @@ class Iterator(object):
 
 def process_image_pipeline(tup):
     (pipeline, x, rng) = tup
+    x = x.astype('float32')
     for (func, kwargs) in pipeline:
-        x = func(x, **kwargs)
+        x = func(x, rng=rng, **kwargs)
     return x
 
 class NumpyArrayIterator(Iterator):
@@ -797,7 +817,7 @@ class NumpyArrayIterator(Iterator):
         self.save_prefix = save_prefix
         self.save_format = save_format
         self.pool = pool
-        self.rngs = range(512)
+
         super(NumpyArrayIterator, self).__init__(x.shape[0], batch_size, shuffle, seed)
 
     def next(self):
@@ -824,13 +844,6 @@ class NumpyArrayIterator(Iterator):
                 x = self.image_data_generator.random_transform(x.astype('float32'))
                 x = self.image_data_generator.standardize(x)
                 batch_x[i] = x
-
-        # batch_x = np.zeros(tuple([current_batch_size] + list(self.x.shape)[1:]))
-        # for i, j in enumerate(index_array):
-        #     x = self.x[j]
-        #     x = self.image_data_generator.random_transform(x.astype('float32'))
-        #     x = self.image_data_generator.standardize(x)
-        #     batch_x[i] = x
 
         if self.save_to_dir:
             for i in range(current_batch_size):
