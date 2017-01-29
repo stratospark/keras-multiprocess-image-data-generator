@@ -1,2 +1,6 @@
 *.pyc
 .ipynb_checkpoints/
+*.zip
+test1
+train
+data/
