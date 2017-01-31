@@ -259,9 +259,9 @@ def random_transform(x,
                      vertical_flip=False,
                      rng=None):
 
-    random_source = 'rng'
+    supplied_rngs = True
     if rng is None:
-        random_source = 'np'
+        supplied_rngs = False
         rng = np.random
 
     # x is a single image, so it doesn't have image number at index 0
@@ -322,10 +322,10 @@ def random_transform(x,
                                  img_channel_axis)
 
     get_random = None
-    if random_source == 'np':
-        get_random = np.random.random
-    else:
+    if supplied_rngs:
         get_random = rng.rand
+    else:
+        get_random = np.random.random
 
     if horizontal_flip:
         if get_random() < 0.5:
@@ -492,6 +492,10 @@ class ImageDataGenerator(object):
             It defaults to the `image_dim_ordering` value found in your
             Keras config file at `~/.keras/keras.json`.
             If you never set it, then it will be "tf".
+        pool: an open multiprocessing.Pool that will be used to
+            process multiple images in parallel. If left off or set to
+            None, then the default serial processing with a single
+            process will be used.
     """
 
     def __init__(self,
@@ -595,7 +599,10 @@ class ImageDataGenerator(object):
             follow_links=follow_links,
             pool=self.pool)
 
+
     def pipeline(self):
+        """A pipeline of functions to apply in order to an image.
+        """
         return [
             (random_transform, dict(
                 row_axis=self.row_axis,
@@ -734,6 +741,8 @@ class Iterator(object):
         self.lock = threading.Lock()
         self.index_generator = self._flow_index(n, batch_size, shuffle, seed)
 
+        # create multiple random number generators to be used separately in
+        # each process when using a multiprocessing.Pool
         if seed:
             self.rngs = [np.random.RandomState(seed + i) for i in range(batch_size)]
         else:
@@ -774,8 +783,23 @@ class Iterator(object):
 
 
 def process_image_pipeline(tup):
+    """ Worker function for NumpyArrayIterator multiprocessing.Pool
+    """
     (pipeline, x, rng) = tup
     x = x.astype('float32')
+    for (func, kwargs) in pipeline:
+        x = func(x, rng=rng, **kwargs)
+    return x
+
+def process_image_pipeline_dir(tup):
+    """ Worker function for DirectoryIterator multiprocessing.Pool
+    """
+    (pipeline, fname, directory, grayscale,
+    target_size, dim_ordering, rng) = tup
+    img = load_img(os.path.join(directory, fname),
+                   grayscale=grayscale,
+                   target_size=target_size)
+    x = img_to_array(img, dim_ordering=dim_ordering)
     for (func, kwargs) in pipeline:
         x = func(x, rng=rng, **kwargs)
     return x
@@ -830,14 +854,16 @@ class NumpyArrayIterator(Iterator):
         # The transformation of images is not under thread lock
         # so it can be done in parallel
 
-        result = None
         batch_x = None
 
         if self.pool:
             pipeline = self.image_data_generator.pipeline()
-            result = self.pool.map(process_image_pipeline, ((pipeline, self.x[j], self.rngs[i%self.batch_size]) for i, j in enumerate(index_array)))
+            result = self.pool.map(process_image_pipeline, (
+                (pipeline, self.x[j], self.rngs[i%self.batch_size])
+                for i, j in enumerate(index_array)))
             batch_x = np.array(result)
         else:
+            # TODO: also utilize image_data_generator.pipeline()?
             batch_x = np.zeros(tuple([current_batch_size] + list(self.x.shape)[1:]))
             for i, j in enumerate(index_array):
                 x = self.x[j]
@@ -897,6 +923,7 @@ class DirectoryIterator(Iterator):
         self.save_to_dir = save_to_dir
         self.save_prefix = save_prefix
         self.save_format = save_format
+        self.pool = pool
 
         white_list_formats = {'png', 'jpg', 'jpeg', 'bmp'}
 
@@ -953,18 +980,33 @@ class DirectoryIterator(Iterator):
             index_array, current_index, current_batch_size = next(self.index_generator)
         # The transformation of images is not under thread lock
         # so it can be done in parallel
-        batch_x = np.zeros((current_batch_size,) + self.image_shape)
+
+        batch_x = None
         grayscale = self.color_mode == 'grayscale'
-        # build batch of image data
-        for i, j in enumerate(index_array):
-            fname = self.filenames[j]
-            img = load_img(os.path.join(self.directory, fname),
-                           grayscale=grayscale,
-                           target_size=self.target_size)
-            x = img_to_array(img, dim_ordering=self.dim_ordering)
-            x = self.image_data_generator.random_transform(x)
-            x = self.image_data_generator.standardize(x)
-            batch_x[i] = x
+
+        if self.pool:
+            pipeline = self.image_data_generator.pipeline()
+            result = self.pool.map(process_image_pipeline_dir, ((pipeline,
+                self.filenames[j],
+                self.directory,
+                grayscale,
+                self.target_size,
+                self.dim_ordering,
+                self.rngs[i%self.batch_size]) for i, j in enumerate(index_array)))
+            batch_x = np.array(result)
+        else:
+            # TODO: also utilize image_data_generator.pipeline()?
+            batch_x = np.zeros((current_batch_size,) + self.image_shape)
+            # build batch of image data
+            for i, j in enumerate(index_array):
+                fname = self.filenames[j]
+                img = load_img(os.path.join(self.directory, fname),
+                               grayscale=grayscale,
+                               target_size=self.target_size)
+                x = img_to_array(img, dim_ordering=self.dim_ordering)
+                x = self.image_data_generator.random_transform(x)
+                x = self.image_data_generator.standardize(x)
+                batch_x[i] = x
         # optionally save augmented images to disk for debugging purposes
         if self.save_to_dir:
             for i in range(current_batch_size):
