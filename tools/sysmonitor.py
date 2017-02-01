@@ -50,9 +50,9 @@ class SysMonitor(threading.Thread):
 
     def plot(self, title, vert=False):
         if vert:
-            fig, ax = plt.subplots(2, 1, figsize=(15, 4))
+            fig, ax = plt.subplots(2, 1, figsize=(15, 6))
         else:
-            fig, ax = plt.subplots(1, 2, figsize=(15, 4))
+            fig, ax = plt.subplots(1, 2, figsize=(15, 6))
         fig.suptitle(title, size=24)
         ax[0].title.set_text('GPU Utilization')
         ax[0].plot([u[1] for u in self.utils])
